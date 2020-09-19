@@ -1,0 +1,222 @@
+﻿@page "/tsp-solver"
+@using DecisionSystems.TSP
+@using DecisionSystems.TSP.Solver
+@inject TSPSpecService TSPSpecService
+
+<h1>Traveling Salesman Problem</h1>
+
+@if (specs == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    var optimalTourDistance = Utils.GetDistance(selectedTSPSpec.OptimalTour, selectedTSPSpec.Cities);
+
+    <form class="mb-3" action="javascript:void(0)">
+        <div class="form-row">
+            <label>
+                TSP specification
+                <select class="form-control" @onchange="TSPSpecSelected">
+                    @foreach (var spec in specs)
+                    {
+                        <option>@spec.Name</option>
+                    }
+                </select>
+            </label>
+        </div>
+
+        <div class="form-row">
+            <label>
+                <input type="checkbox" value="" @bind="showOptimalTour" />
+                Show optimal tour (Distance = @optimalTourDistance.ToString("F2"))
+            </label>
+        </div>
+
+        <div class="form-row">
+            <label>TSP solvers</label>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Best solution</th>
+                        <th>Difference to optimal solution</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var solver in solvers)
+                    {
+                        <tr>
+                            <td>
+                                <label>
+                                    <span style="display: inline-block; height: 24px; width: 24px; background: @solver.Color">&nbsp;</span>
+                                    <input type="checkbox" value="" @bind="solver.IsSelected" />
+                                    @solver.Name
+                                </label>
+                            </td>
+
+                            @if (solver.TryGetSolution(out var solution))
+                            {
+                                var distance = Utils.GetDistance(solution, selectedTSPSpec.Cities);
+                                <td>@distance.ToString("F2")</td>
+                                <td>@((distance / optimalTourDistance).ToString("P0"))</td>
+                            }
+                            else
+                            {
+                                <td>-</td>
+                                <td>-</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <button class="btn btn-primary" @onclick="Start" disabled=@(!solvers.Any(solver => solver.IsSelected))>Start</button>
+    </form>
+
+    <BECanvas @ref="scene" Width="500" Height="500"></BECanvas>
+}
+
+@code {
+    public class UITSPSolver
+    {
+        private readonly ITSPSolver solver;
+        private IReadOnlyList<int> solution;
+
+        public string Name { get; }
+        public bool IsSelected { get; set; }
+        public string Color { get; }
+
+        public UITSPSolver(ITSPSolver solver, string name, string color)
+        {
+            this.solver = solver ?? throw new ArgumentNullException(nameof(solver));
+            Name = name ?? throw new ArgumentNullException(nameof(name));
+            Color = color ?? throw new ArgumentNullException(nameof(color));
+        }
+
+        public void Solve(IReadOnlyList<Location> cities)
+        {
+            solution = solver.Solve(cities);
+            if (solution.Distinct().Count() != cities.Count)
+            {
+                Console.WriteLine($"WARNING: Solver {solver} returned invalid solution.");
+            }
+        }
+
+        public void Reset()
+        {
+            solution = null;
+        }
+
+        public bool TryGetSolution(out IReadOnlyList<int> solution)
+        {
+            solution = this.solution;
+            return solution != null;
+        }
+    }
+
+    TSPSpec[] specs;
+    TSPSpec selectedTSPSpec = null;
+    bool showOptimalTour = true;
+
+    private readonly IReadOnlyCollection<UITSPSolver> solvers = new UITSPSolver[]
+    {
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        var serverSpecs = await TSPSpecService.GetSpecs();
+        specs = serverSpecs
+            .Select(SerializableTSPSpec.ToDomain)
+            .OrderBy(spec => spec.Cities.Count)
+            .ToArray();
+        selectedTSPSpec = specs.FirstOrDefault();
+    }
+
+    void TSPSpecSelected(ChangeEventArgs e)
+    {
+        selectedTSPSpec = specs.Single(spec => spec.Name == (string)e.Value);
+        foreach (var solver in solvers)
+        {
+            solver.Reset();
+        }
+    }
+
+    void Start()
+    {
+        foreach (var solver in solvers.Where(solver => solver.IsSelected))
+        {
+            solver.Solve(selectedTSPSpec.Cities);
+        }
+    }
+
+    private BECanvasComponent scene;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (scene == null)
+        {
+            return;
+        }
+
+        var context = await scene.CreateCanvas2DAsync();
+        await context.ClearRectAsync(0, 0, scene.Width, scene.Height);
+
+        if (selectedTSPSpec == null)
+        {
+            return;
+        }
+
+        var minX = selectedTSPSpec.Cities.Min(location => location.X);
+        var maxX = selectedTSPSpec.Cities.Max(location => location.X);
+        var minY = selectedTSPSpec.Cities.Min(location => location.Y);
+        var maxY = selectedTSPSpec.Cities.Max(location => location.Y);
+
+        (double, double) getSceneCoordinates(Location location)
+        {
+            var padding = 10;
+            var x = (double)(location.X - minX) / (maxX - minX) * (scene.Width - 2 * padding) + padding;
+            var y = (1 - (double)(location.Y - minY) / (maxY - minY)) * (scene.Height - 2 * padding) + padding;
+            return (x, y);
+        }
+
+        async Task drawTour(string color, IReadOnlyList<int> tour)
+        {
+            await context.SetStrokeStyleAsync(color);
+            await context.BeginPathAsync();
+            var (startX, startY) = getSceneCoordinates(selectedTSPSpec.Cities[tour[0] - 1]);
+            await context.MoveToAsync(startX, startY);
+            foreach (var cityIndex in tour.Skip(1))
+            {
+                var city = selectedTSPSpec.Cities[cityIndex - 1];
+                var (x, y) = getSceneCoordinates(city);
+                await context.LineToAsync(x, y);
+            }
+            await context.ClosePathAsync();
+            await context.StrokeAsync();
+        }
+
+        if (showOptimalTour)
+        {
+            await drawTour("lime", selectedTSPSpec.OptimalTour);
+        }
+
+        foreach (var solver in solvers)
+        {
+            if (solver.IsSelected && solver.TryGetSolution(out var solution))
+            {
+                await drawTour(solver.Color, solution);
+            }
+        }
+
+        await context.SetFillStyleAsync("black");
+        foreach (var city in selectedTSPSpec.Cities)
+        {
+            await context.BeginPathAsync();
+            var (x, y) = getSceneCoordinates(city);
+            await context.ArcAsync(x, y, 2, 0, 2 * Math.PI);
+            await context.FillAsync();
+        }
+    }
+}
